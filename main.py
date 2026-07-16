@@ -9,18 +9,18 @@ from flask import Flask
 # Flask App setup (Railway ko active rakhne ke liye)
 app = Flask(__name__)
 
-# Discord Webhook URL (Aapka URL bilkul sahi set hai)
+# Discord Webhook URL
 DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1527005996201939168/1_x_r20GPpTKdV4l9YsU_-qsdqaZnBneNSzDWpYo9zzz6aKUWYlKens-tnUqZjMm1Coz"
 
 @app.route('/')
 def home():
-    return "Gold Volume Monitor Live! Only 5-Minute (5M) timeframe is active."
+    return "Gold Spot (XAUUSD) Volume Monitor Live! Only 5-Minute (5M) is active."
 
-# Yahoo Finance se Gold (GC=F) 5M data fetch karne ka function
+# Yahoo Finance se Gold Spot (XAUUSD=X) ka data fetch karne ka function
 def get_gold_5m_data():
     try:
-        # 5m interval aur 2d range (taake data points hamesha 20 se zyada rahein)
-        url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F?interval=5m&range=2d"
+        # Humne GC=F ko badal kar XAUUSD=X (Gold Spot) kar diya hai taake exact match ho!
+        url = "https://query1.finance.yahoo.com/v8/finance/chart/XAUUSD=X?interval=5m&range=2d"
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
         response = requests.get(url, headers=headers, timeout=10)
         
@@ -56,12 +56,11 @@ def get_gold_5m_data():
         print(f"Error fetching data: {e}")
         return None
 
-# Spike check karne ka loop (Har 1 minute baad check karega)
+# Spike check karne ka loop
 def monitor_volume():
-    print("Background Volume Monitor Started for 5-Minute Timeframe...")
+    print("Background Volume Monitor Started for XAUUSD (Gold Spot)...")
     last_checked_time = None
     
-    # --- Input Parameters (Exactly like Pine Script) ---
     lengthInput = 20          # Average Volume Period (Pichli 20 candles)
     thresholdInput = 2.0      # Spike Threshold Multiplier (2x)
     enableCombo = True        # Enable Combo Detection
@@ -82,34 +81,28 @@ def monitor_volume():
                 current_open = last_candle['open']
                 current_close = last_candle['close']
                 
-                # Spike Logic (isSpike = volume >= spikeLevel)
                 isSpike = current_volume >= spikeLevel
                 
                 if isSpike and volMA > 0:
                     isBullish = current_close >= current_open
                     spikeRatio = current_volume / volMA
                     
-                    # Price Change %: math.abs(close - open) / open * 100
                     price_change_percent = (abs(current_close - current_open) / current_open) * 100
-                    
-                    # Combo Logic: enableCombo and isSpike and priceChangePercent >= priceChangeThresh
                     isCombo = enableCombo and price_change_percent >= priceChangeThresh
                     
                     candle_time = last_candle['time'].strftime('%Y-%m-%d %H:%M:%S')
                     
-                    # Prevent duplicate alerts for the same candle
                     if candle_time != last_checked_time:
                         last_checked_time = candle_time
                         
-                        # Formatting Emojis and Alerts
                         if isCombo:
-                            status_emoji = "🔥 **COMBO SPIKE DETECTED (5M)!** 🔥"
+                            status_emoji = "🔥 **COMBO SPIKE DETECTED (XAUUSD 5M)!** 🔥"
                             color_marker = "Combo Spike (High Vol & High Move) ⚡"
                         elif isBullish:
-                            status_emoji = "🟢 **BULLISH VOLUME SPIKE (5M)!** 📈"
+                            status_emoji = "🟢 **BULLISH VOLUME SPIKE (XAUUSD 5M)!** 📈"
                             color_marker = "Bullish (Green) 🟢"
                         else:
-                            status_emoji = "🔴 **BEARISH VOLUME SPIKE (5M)!** 📉"
+                            status_emoji = "🔴 **BEARISH VOLUME SPIKE (XAUUSD 5M)!** 📉"
                             color_marker = "Bearish (Red) 🔴"
                             
                         message = (
@@ -124,7 +117,6 @@ def monitor_volume():
                             f"💰 **Close Price:** ${current_close:.2f}"
                         )
                         
-                        # Send to Discord
                         try:
                             requests.post(DISCORD_WEBHOOK_URL, json={"content": message}, timeout=5)
                             print(f"Alert sent successfully for {candle_time}!")
@@ -138,7 +130,6 @@ def monitor_volume():
         except Exception as loop_err:
             print(f"Error in monitor loop: {loop_err}")
             
-        # Har 60 seconds baad checks repeat karega
         time.sleep(60)
 
 # Background Thread start karne ka function
