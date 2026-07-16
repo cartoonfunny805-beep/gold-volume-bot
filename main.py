@@ -16,32 +16,46 @@ DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1527005996201939168/1_x_
 def home():
     return "Gold Volume Monitor Live! Server is running."
 
-# Yahoo Finance se Gold (XAUUSD / GC=F) ka data fetch karne ka function
+# Yahoo Finance se Gold (GC=F) ka real-time data fetch karne ka function (With Error Handling)
 def get_gold_data():
     try:
-        # Last 1 day ka data 5-minute interval par
+        # GC=F Gold Futures hai jiska volume OANDA se boht close match karta hai
         url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F?interval=5m&range=1d"
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        response = requests.get(url, headers=headers)
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        response = requests.get(url, headers=headers, timeout=10)
+        
+        if response.status_code != 200:
+            print(f"API Error: Status code {response.status_code}")
+            return None
+            
         data = response.json()
         
-        timestamps = data['chart']['result'][0]['timestamp']
-        indicators = data['chart']['result'][0]['indicators']['quote'][0]
-        
-        volumes = indicators['volume']
-        closes = indicators['close']
-        opens = indicators['open']  # Open price bhi fetch kar rahe hain bullish/bearish check karne ke liye
-        
-        df = pd.DataFrame({
-            'time': [datetime.fromtimestamp(t) for t in timestamps],
-            'open': opens,
-            'close': closes,
-            'volume': volumes
-        })
-        df = df.dropna().reset_index(drop=True)
-        return df
+        # Check if proper data structure exists (to avoid 'timestamp' error)
+        if 'chart' in data and data['chart']['result'] and 'timestamp' in data['chart']['result'][0]:
+            timestamps = data['chart']['result'][0]['timestamp']
+            indicators = data['chart']['result'][0]['indicators']['quote'][0]
+            
+            volumes = indicators.get('volume', [])
+            closes = indicators.get('close', [])
+            opens = indicators.get('open', [])
+            
+            # Agar data khali hai to skip karein
+            if not timestamps or not volumes or not closes:
+                return None
+                
+            df = pd.DataFrame({
+                'time': [datetime.fromtimestamp(t) for t in timestamps],
+                'open': opens,
+                'close': closes,
+                'volume': volumes
+            })
+            df = df.dropna().reset_index(drop=True)
+            return df
+        else:
+            print("Required fields missing in API response.")
+            return None
     except Exception as e:
-        print(f"Error fetching data from Yahoo Finance: {e}")
+        print(f"Error fetching data: {e}")
         return None
 
 # Spike check karne ka loop (Har 1 minute baad chalega)
@@ -49,67 +63,73 @@ def monitor_volume():
     print("Background Volume Monitor Started...")
     last_checked_time = None
     
-    # Input Parameters (Exactly Pine Script ki tarah)
     lengthInput = 20          # Average Volume Period (Pichli 20 candles)
     thresholdInput = 2.0      # Spike Threshold Multiplier (2x)
     
     while True:
-        df = get_gold_data()
-        if df is not None and len(df) > lengthInput:
-            last_candle = df.iloc[-1]
-            previous_candles = df.iloc[-(lengthInput + 1):-1] # Pichli 20 candles
-            
-            # Simple Moving Average (SMA) Calculation (Exactly like Pine Script volMA)
-            volMA = previous_candles['volume'].mean()
-            spikeLevel = volMA * thresholdInput
-            
-            current_volume = last_candle['volume']
-            current_open = last_candle['open']
-            current_close = last_candle['close']
-            
-            # Spike Logic (isSpike = volume >= spikeLevel)
-            isSpike = current_volume >= spikeLevel
-            
-            if isSpike and volMA > 0:
-                # Bullish or Bearish check (isBullish = close >= open)
-                isBullish = current_close >= current_open
-                spikeRatio = current_volume / volMA
+        try:
+            df = get_gold_data()
+            if df is not None and len(df) > lengthInput:
+                last_candle = df.iloc[-1]
+                previous_candles = df.iloc[-(lengthInput + 1):-1] # Pichli 20 candles
                 
-                # Price Change % Calculation (math.abs(close - open) / open * 100)
-                price_change_percent = (abs(current_close - current_open) / current_open) * 100
-                candle_time = last_candle['time'].strftime('%Y-%m-%d %H:%M:%S')
+                # Simple Moving Average (SMA) of Volume
+                volMA = previous_candles['volume'].mean()
+                spikeLevel = volMA * thresholdInput
                 
-                # Agar naya alert hai to send karein
-                if candle_time != last_checked_time:
-                    last_checked_time = candle_time
+                current_volume = last_candle['volume']
+                current_open = last_candle['open']
+                current_close = last_candle['close']
+                
+                # Check Spike (isSpike = volume >= spikeLevel)
+                isSpike = current_volume >= spikeLevel
+                
+                if isSpike and volMA > 0:
+                    # Bullish or Bearish check
+                    isBullish = current_close >= current_open
+                    spikeRatio = current_volume / volMA
                     
-                    # Alert ke design aur content ki settings (Green/Red markers)
-                    if isBullish:
-                        status_emoji = "🟢 **BULLISH VOLUME SPIKE!** 📈"
-                        color_marker = "Bullish (Green) 🟢"
-                    else:
-                        status_emoji = "🔴 **BEARISH VOLUME SPIKE!** 📉"
-                        color_marker = "Bearish (Red) 🔴"
+                    # Price Change %
+                    price_change_percent = (abs(current_close - current_open) / current_open) * 100
+                    candle_time = last_candle['time'].strftime('%Y-%m-%d %H:%M:%S')
+                    
+                    # Prevent duplicate alerts
+                    if candle_time != last_checked_time:
+                        last_checked_time = candle_time
                         
-                    message = (
-                        f"{status_emoji}\n"
-                        f"🕒 **Time (5M):** {candle_time}\n"
-                        f"📊 **Current Volume:** {int(current_volume):,}\n"
-                        f"📈 **Volume SMA (20):** {int(volMA):,}\n"
-                        f"🚀 **Spike Ratio:** {spikeRatio:.2f}x (Threshold: {thresholdInput}x)\n"
-                        f"💵 **Candle Type:** {color_marker}\n"
-                        f"⚡ **Price Change:** {price_change_percent:.3f}%\n"
-                        f"💰 **Close Price:** ${current_close:.2f}"
-                    )
-                    
-                    # Discord par alert bhejna
-                    try:
-                        requests.post(DISCORD_WEBHOOK_URL, json={"content": message})
-                        print(f"Alert sent successfully for {candle_time}!")
-                    except Exception as discord_err:
-                        print(f"Failed to send Discord alert: {discord_err}")
-        
-        # Har 1 minute baad check karega
+                        if isBullish:
+                            status_emoji = "🟢 **BULLISH VOLUME SPIKE!** 📈"
+                            color_marker = "Bullish (Green) 🟢"
+                        else:
+                            status_emoji = "🔴 **BEARISH VOLUME SPIKE!** 📉"
+                            color_marker = "Bearish (Red) 🔴"
+                            
+                        message = (
+                            f"{status_emoji}\n"
+                            f"🕒 **Time (5M):** {candle_time}\n"
+                            f"📊 **Current Volume:** {int(current_volume):,}\n"
+                            f"📈 **Volume SMA (20):** {int(volMA):,}\n"
+                            f"🚀 **Spike Ratio:** {spikeRatio:.2f}x (Threshold: {thresholdInput}x)\n"
+                            f"💵 **Candle Type:** {color_marker}\n"
+                            f"⚡ **Price Change:** {price_change_percent:.3f}%\n"
+                            f"💰 **Close Price (GC=F):** ${current_close:.2f}"
+                        )
+                        
+                        # Discord Webhook Send
+                        try:
+                            requests.post(DISCORD_WEBHOOK_URL, json={"content": message}, timeout=5)
+                            print(f"Alert sent successfully for {candle_time}!")
+                        except Exception as discord_err:
+                            print(f"Failed to send Discord alert: {discord_err}")
+            else:
+                if df is None:
+                    print("Skipping check as data was None.")
+                else:
+                    print(f"Not enough data points. Needed {lengthInput}, got {len(df)}")
+        except Exception as loop_err:
+            print(f"Error in monitor loop: {loop_err}")
+            
+        # Har 60 seconds baad check karega (1 minute)
         time.sleep(60)
 
 # Background Thread start karne ka function
