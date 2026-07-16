@@ -1,81 +1,92 @@
+import os
 import time
 import requests
 import pandas as pd
-import os
-
-# Web server taake Render isko active rakhe
+from datetime import datetime
+from threading import Thread
 from flask import Flask
-import threading
 
-app = Flask('')
+# Flask App setup (Railway ko active rakhne ke liye)
+app = Flask(__name__)
+
+# Discord Webhook URL (Aapka bilkul sahi webhook set kar diya hai)
+DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1527005996201939168/1_x_r20GPpTKdV4l9YsU_-qsdqaZnBneNSzDWpYo9zzz6aKUWYlKens-tnUqZjMm1Coz"
 
 @app.route('/')
 def home():
-    return "Bot is running 24/7!"
+    return "Gold Volume Monitor Live! Server is running."
 
-def run_web_server():
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host='0.0.0.0', port=port)
-
-# Aapka Discord Webhook URL
-DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1527005996201939168/1_x_r20GPpTKdV4l9YsU_-qsdqaZnBneNSzDWpYo9zzz6aKUWYlKens-tnUqZjMm1Coz"
-SYMBOL = "PAXGUSDT"
-INTERVALS = ["5m", "30m"]
-
-def send_discord_alert(message):
-    payload = {"content": message}
+# Yahoo Finance se Gold (XAUUSD / GC=F) ka data fetch karne ka function
+def get_gold_data():
     try:
-        response = requests.post(DISCORD_WEBHOOK_URL, json=payload)
-    except Exception as e:
-        print("Discord send error:", e)
-
-def get_volume_data(interval):
-    url = f"https://api.binance.com/api/v3/klines?symbol={SYMBOL}&interval={interval}&limit=50"
-    try:
-        response = requests.get(url).json()
-        df = pd.DataFrame(response, columns=[
-            'open_time', 'open', 'high', 'low', 'close', 'volume', 
-            'close_time', 'quote_volume', 'count', 'taker_buy_volume', 
-            'taker_buy_quote_volume', 'ignore'
-        ])
-        df['volume'] = df['volume'].astype(float)
+        # Last 1 day ka data 5-minute interval par
+        url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F?interval=5m&range=1d"
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        response = requests.get(url, headers=headers)
+        data = response.json()
+        
+        timestamps = data['chart']['result'][0]['timestamp']
+        indicators = data['chart']['result'][0]['indicators']['quote'][0]
+        
+        volumes = indicators['volume']
+        closes = indicators['close']
+        
+        df = pd.DataFrame({
+            'time': [datetime.fromtimestamp(t) for t in timestamps],
+            'close': closes,
+            'volume': volumes
+        })
+        df = df.dropna().reset_index(drop=True)
         return df
     except Exception as e:
-        print(f"Error fetching data: {e}")
+        print(f"Error fetching data from Yahoo Finance: {e}")
         return None
 
+# Spike check karne ka loop (Har 1 minute baad chalega)
 def monitor_volume():
-    last_alerted_candle = {"5m": None, "30m": None}
-    print("🚀 Gold Volume Monitor Live!")
-    send_discord_alert("🚀 **Gold (XAUUSD) 24/7 Cloud Bot Active!**")
+    print("Background Volume Monitor Started...")
+    last_checked_time = None
     
     while True:
-        for interval in INTERVALS:
-            df = get_volume_data(interval)
-            if df is None or len(df) < 20:
-                continue
-            
-            closed_candle_time = df.iloc[-2]['open_time']
-            closed_candle_volume = df.iloc[-2]['volume']
-            avg_volume = df.iloc[-22:-2]['volume'].mean()
+        df = get_gold_data()
+        if df is not None and len(df) > 20:
+            last_candle = df.iloc[-1]
+            previous_candles = df.iloc[-21:-1] # Pichli 20 candles ka average
+            avg_volume = previous_candles['volume'].mean()
+            current_volume = last_candle['volume']
             
             if avg_volume > 0:
-                ratio = closed_candle_volume / avg_volume
-                if ratio >= 2.0 and last_alerted_candle[interval] != closed_candle_time:
-                    price = df.iloc[-2]['close']
+                ratio = current_volume / avg_volume
+                candle_time = last_candle['time'].strftime('%Y-%m-%d %H:%M:%S')
+                
+                # Agar volume 2x ya us se zyada ho aur alert pehle na gaya ho
+                if ratio >= 2.0 and candle_time != last_checked_time:
+                    last_checked_time = candle_time
                     message = (
-                        f"⚠️ **GOLD (XAUUSD) VOLUME SPIKE!** ⚠️\n"
-                        f"⏱️ **Timeframe:** {interval}\n"
-                        f"📈 **Current Volume:** {closed_candle_volume:.2f}\n"
-                        f"📊 **Average Volume:** {avg_volume:.2f}\n"
-                        f"🔥 **Spike Multiplier:** {ratio:.2f}x\n"
-                        f"💰 **Approx Price:** ${float(price):.2f}"
+                        f"⚠️ **GOLD (XAUUSD) VOLUME SPIKE DETECTED!** ⚠️\n"
+                        f"🕒 **Time (5M):** {candle_time}\n"
+                        f"📊 **Current Volume:** {int(current_volume):,}\n"
+                        f"📈 **Average Volume (20 periods):** {int(avg_volume):,}\n"
+                        f"🚀 **Spike Ratio:** {ratio:.2f}x (More than 2x!)\n"
+                        f"💰 **Close Price:** ${last_candle['close']:.2f}"
                     )
-                    send_discord_alert(message)
-                    last_alerted_candle[interval] = closed_candle_time
-        time.sleep(10)
+                    # Send alert to Discord
+                    try:
+                        requests.post(DISCORD_WEBHOOK_URL, json={"content": message})
+                        print(f"Alert sent successfully for {candle_time}!")
+                    except Exception as discord_err:
+                        print(f"Failed to send Discord alert: {discord_err}")
+        
+        time.sleep(60)
+
+# Background Thread start karne ka function
+def run_background_tasks():
+    monitor_thread = Thread(target=monitor_volume)
+    monitor_thread.daemon = True
+    monitor_thread.start()
 
 if __name__ == "__main__":
-    t = threading.Thread(target=run_web_server)
-    t.start()
-    monitor_volume()
+    run_background_tasks()
+    
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port)
