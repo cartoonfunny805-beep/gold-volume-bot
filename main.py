@@ -12,55 +12,76 @@ app = Flask(__name__)
 # Discord Webhook URL
 DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1527005996201939168/1_x_r20GPpTKdV4l9YsU_-qsdqaZnBneNSzDWpYo9zzz6aKUWYlKens-tnUqZjMm1Coz"
 
+# OANDA API Credentials (Demo Account)
+OANDA_API_KEY = "333c26463f780224a2861d9fea171bf0-57ecca2eaecf84d074a389e01344c39dc6"
+OANDA_ACCOUNT_ID = "101-001-39759925-001"
+
 @app.route('/')
 def home():
-    return "Gold Spot (XAUUSD) Volume Monitor Live! Only 5-Minute (5M) is active."
+    return "Gold Spot (XAU/USD) Volume Monitor Live on OANDA API!"
 
-# Yahoo Finance se Gold Spot (XAUUSD=X) ka data fetch karne ka function
-def get_gold_5m_data():
+# Direct OANDA API se Gold Spot (XAU_USD) 5M Candles Fetch Karne Ka Function
+def get_oanda_gold_data():
     try:
-        # Humne GC=F ko badal kar XAUUSD=X (Gold Spot) kar diya hai taake exact match ho!
-        url = "https://query1.finance.yahoo.com/v8/finance/chart/XAUUSD=X?interval=5m&range=2d"
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-        response = requests.get(url, headers=headers, timeout=10)
+        # OANDA Practice Server Endpoint
+        url = "https://api-fxpractice.oanda.com/v3/instruments/XAU_USD/candles"
+        
+        headers = {
+            "Authorization": f"Bearer {OANDA_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        # granularity='M5' (5-Minute candles), count=50 (pichli 50 candles average nikalne ke liye)
+        params = {
+            "granularity": "M5",
+            "count": 50
+        }
+        
+        response = requests.get(url, headers=headers, params=params, timeout=10)
         
         if response.status_code != 200:
-            print(f"API Error: Status code {response.status_code}")
+            print(f"OANDA API Error: Status {response.status_code} - {response.text}")
             return None
             
         data = response.json()
+        candles = data.get('candles', [])
         
-        if 'chart' in data and data['chart']['result'] and 'timestamp' in data['chart']['result'][0]:
-            timestamps = data['chart']['result'][0]['timestamp']
-            indicators = data['chart']['result'][0]['indicators']['quote'][0]
-            
-            volumes = indicators.get('volume', [])
-            closes = indicators.get('close', [])
-            opens = indicators.get('open', [])
-            
-            if not timestamps or not volumes or not closes:
-                return None
-                
-            df = pd.DataFrame({
-                'time': [datetime.fromtimestamp(t) for t in timestamps],
-                'open': opens,
-                'close': closes,
-                'volume': volumes
-            })
-            df = df.dropna().reset_index(drop=True)
-            return df
-        else:
-            print("Required fields missing in API response.")
+        if not candles:
+            print("No candles returned from OANDA.")
             return None
+            
+        # Parse Candles Data
+        parsed_data = []
+        for c in candles:
+            # Sirf complete candles ka data uthana hai (c['complete'] == True)
+            # Lekin real-time check ke liye hum last candle (chahe incomplete ho) bhi check karenge
+            volume = float(c.get('volume', 0))
+            candle_time = datetime.strptime(c['time'][:19], "%Y-%m-%dT%H:%M:%S")
+            
+            mid = c.get('mid', {})
+            open_p = float(mid.get('o', 0))
+            close_p = float(mid.get('c', 0))
+            
+            parsed_data.append({
+                'time': candle_time,
+                'open': open_p,
+                'close': close_p,
+                'volume': volume
+            })
+            
+        df = pd.DataFrame(parsed_data)
+        return df
+        
     except Exception as e:
-        print(f"Error fetching data: {e}")
+        print(f"Error fetching data from OANDA: {e}")
         return None
 
-# Spike check karne ka loop
+# Spike check karne ka loop (Har 1 minute baad check karega)
 def monitor_volume():
-    print("Background Volume Monitor Started for XAUUSD (Gold Spot)...")
+    print("Background Volume Monitor Started using DIRECT OANDA API...")
     last_checked_time = None
     
+    # --- Input Parameters (Exactly like Pine Script) ---
     lengthInput = 20          # Average Volume Period (Pichli 20 candles)
     thresholdInput = 2.0      # Spike Threshold Multiplier (2x)
     enableCombo = True        # Enable Combo Detection
@@ -68,8 +89,9 @@ def monitor_volume():
     
     while True:
         try:
-            df = get_gold_5m_data()
+            df = get_oanda_gold_data()
             if df is not None and len(df) > lengthInput:
+                # OANDA dynamic price & volume check
                 last_candle = df.iloc[-1]
                 previous_candles = df.iloc[-(lengthInput + 1):-1] # Pichli 20 candles
                 
@@ -81,35 +103,39 @@ def monitor_volume():
                 current_open = last_candle['open']
                 current_close = last_candle['close']
                 
+                # Spike Logic
                 isSpike = current_volume >= spikeLevel
                 
                 if isSpike and volMA > 0:
                     isBullish = current_close >= current_open
                     spikeRatio = current_volume / volMA
                     
+                    # Price Change %
                     price_change_percent = (abs(current_close - current_open) / current_open) * 100
                     isCombo = enableCombo and price_change_percent >= priceChangeThresh
                     
                     candle_time = last_candle['time'].strftime('%Y-%m-%d %H:%M:%S')
                     
+                    # Prevent duplicate alerts
                     if candle_time != last_checked_time:
                         last_checked_time = candle_time
                         
+                        # Formatting Emojis based on Pine Script logic
                         if isCombo:
-                            status_emoji = "🔥 **COMBO SPIKE DETECTED (XAUUSD 5M)!** 🔥"
+                            status_emoji = "🔥 **OANDA: COMBO SPIKE DETECTED (5M)!** 🔥"
                             color_marker = "Combo Spike (High Vol & High Move) ⚡"
                         elif isBullish:
-                            status_emoji = "🟢 **BULLISH VOLUME SPIKE (XAUUSD 5M)!** 📈"
+                            status_emoji = "🟢 **OANDA: BULLISH VOLUME SPIKE (5M)!** 📈"
                             color_marker = "Bullish (Green) 🟢"
                         else:
-                            status_emoji = "🔴 **BEARISH VOLUME SPIKE (XAUUSD 5M)!** 📉"
+                            status_emoji = "🔴 **OANDA: BEARISH VOLUME SPIKE (5M)!** 📉"
                             color_marker = "Bearish (Red) 🔴"
                             
                         message = (
                             f"{status_emoji}\n"
                             f"⏰ **Timeframe:** 5-Minute (5M)\n"
-                            f"🕒 **Candle Time:** {candle_time}\n"
-                            f"📊 **Current Volume:** {int(current_volume):,}\n"
+                            f"🕒 **Candle Time:** {candle_time} (GMT)\n"
+                            f"📊 **Current Volume (Ticks):** {int(current_volume):,}\n"
                             f"📈 **Volume SMA (20):** {int(volMA):,}\n"
                             f"🚀 **Spike Ratio:** {spikeRatio:.2f}x (Threshold: {thresholdInput}x)\n"
                             f"💵 **Candle Type:** {color_marker}\n"
@@ -117,9 +143,10 @@ def monitor_volume():
                             f"💰 **Close Price:** ${current_close:.2f}"
                         )
                         
+                        # Send to Discord
                         try:
                             requests.post(DISCORD_WEBHOOK_URL, json={"content": message}, timeout=5)
-                            print(f"Alert sent successfully for {candle_time}!")
+                            print(f"OANDA Alert sent successfully for {candle_time}!")
                         except Exception as discord_err:
                             print(f"Failed to send Discord alert: {discord_err}")
             else:
@@ -128,7 +155,7 @@ def monitor_volume():
                 else:
                     print(f"Not enough data points. Needed {lengthInput}, got {len(df)}")
         except Exception as loop_err:
-            print(f"Error in monitor loop: {loop_err}")
+            print(f"Error in OANDA monitor loop: {loop_err}")
             
         time.sleep(60)
 
