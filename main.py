@@ -9,7 +9,7 @@ from flask import Flask
 # Flask App setup (Railway ko active rakhne ke liye)
 app = Flask(__name__)
 
-# Discord Webhook URL (Aapka bilkul sahi webhook set kar diya hai)
+# Discord Webhook URL (Aapka bilkul sahi webhook set hai)
 DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1527005996201939168/1_x_r20GPpTKdV4l9YsU_-qsdqaZnBneNSzDWpYo9zzz6aKUWYlKens-tnUqZjMm1Coz"
 
 @app.route('/')
@@ -30,9 +30,11 @@ def get_gold_data():
         
         volumes = indicators['volume']
         closes = indicators['close']
+        opens = indicators['open']  # Open price bhi fetch kar rahe hain bullish/bearish check karne ke liye
         
         df = pd.DataFrame({
             'time': [datetime.fromtimestamp(t) for t in timestamps],
+            'open': opens,
             'close': closes,
             'volume': volumes
         })
@@ -47,36 +49,67 @@ def monitor_volume():
     print("Background Volume Monitor Started...")
     last_checked_time = None
     
+    # Input Parameters (Exactly Pine Script ki tarah)
+    lengthInput = 20          # Average Volume Period (Pichli 20 candles)
+    thresholdInput = 2.0      # Spike Threshold Multiplier (2x)
+    
     while True:
         df = get_gold_data()
-        if df is not None and len(df) > 20:
+        if df is not None and len(df) > lengthInput:
             last_candle = df.iloc[-1]
-            previous_candles = df.iloc[-21:-1] # Pichli 20 candles ka average
-            avg_volume = previous_candles['volume'].mean()
-            current_volume = last_candle['volume']
+            previous_candles = df.iloc[-(lengthInput + 1):-1] # Pichli 20 candles
             
-            if avg_volume > 0:
-                ratio = current_volume / avg_volume
+            # Simple Moving Average (SMA) Calculation (Exactly like Pine Script volMA)
+            volMA = previous_candles['volume'].mean()
+            spikeLevel = volMA * thresholdInput
+            
+            current_volume = last_candle['volume']
+            current_open = last_candle['open']
+            current_close = last_candle['close']
+            
+            # Spike Logic (isSpike = volume >= spikeLevel)
+            isSpike = current_volume >= spikeLevel
+            
+            if isSpike and volMA > 0:
+                # Bullish or Bearish check (isBullish = close >= open)
+                isBullish = current_close >= current_open
+                spikeRatio = current_volume / volMA
+                
+                # Price Change % Calculation (math.abs(close - open) / open * 100)
+                price_change_percent = (abs(current_close - current_open) / current_open) * 100
                 candle_time = last_candle['time'].strftime('%Y-%m-%d %H:%M:%S')
                 
-                # Agar volume 2x ya us se zyada ho aur alert pehle na gaya ho
-                if ratio >= 2.0 and candle_time != last_checked_time:
+                # Agar naya alert hai to send karein
+                if candle_time != last_checked_time:
                     last_checked_time = candle_time
+                    
+                    # Alert ke design aur content ki settings (Green/Red markers)
+                    if isBullish:
+                        status_emoji = "🟢 **BULLISH VOLUME SPIKE!** 📈"
+                        color_marker = "Bullish (Green) 🟢"
+                    else:
+                        status_emoji = "🔴 **BEARISH VOLUME SPIKE!** 📉"
+                        color_marker = "Bearish (Red) 🔴"
+                        
                     message = (
-                        f"⚠️ **GOLD (XAUUSD) VOLUME SPIKE DETECTED!** ⚠️\n"
+                        f"{status_emoji}\n"
                         f"🕒 **Time (5M):** {candle_time}\n"
                         f"📊 **Current Volume:** {int(current_volume):,}\n"
-                        f"📈 **Average Volume (20 periods):** {int(avg_volume):,}\n"
-                        f"🚀 **Spike Ratio:** {ratio:.2f}x (More than 2x!)\n"
-                        f"💰 **Close Price:** ${last_candle['close']:.2f}"
+                        f"📈 **Volume SMA (20):** {int(volMA):,}\n"
+                        f"🚀 **Spike Ratio:** {spikeRatio:.2f}x (Threshold: {thresholdInput}x)\n"
+                        f"💵 **Candle Type:** {color_marker}\n"
+                        f"⚡ **Price Change:** {price_change_percent:.3f}%\n"
+                        f"💰 **Close Price:** ${current_close:.2f}"
                     )
-                    # Send alert to Discord
+                    
+                    # Discord par alert bhejna
                     try:
                         requests.post(DISCORD_WEBHOOK_URL, json={"content": message})
                         print(f"Alert sent successfully for {candle_time}!")
                     except Exception as discord_err:
                         print(f"Failed to send Discord alert: {discord_err}")
         
+        # Har 1 minute baad check karega
         time.sleep(60)
 
 # Background Thread start karne ka function
